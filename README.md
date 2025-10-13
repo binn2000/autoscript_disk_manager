@@ -1,4 +1,4 @@
-HƯỚNG DẪN SỬ DỤNG NHANH — auto.txt:
+HƯỚNG DẪN SỬ DỤNG NHANH — auto.txt
 
 Script quản lý ổ đĩa cho CentOS 7:
 - Tạo / xóa / xem phân vùng.
@@ -6,10 +6,10 @@ Script quản lý ổ đĩa cho CentOS 7:
 - Mount & bật quota.
 - Cấu hình quota + Samba chia sẻ.
 
-CÁCH DÙNG:
+Cách dùng:
 - Cấp quyền & chạy: chmod +x auto.txt ./auto.txt
 
-LƯU Ý NHANH:
+Lưu ý nhanh:
 - Chạy bằng tài khoản root.
 - Sao lưu dữ liệu trước khi thao tác.
 - Dành cho môi trường LAB hoặc học tập.
