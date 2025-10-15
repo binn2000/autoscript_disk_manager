@@ -1,0 +1,611 @@
+#!/bin/bash
+
+# =========================================
+
+# HƯỚNG DẪN & SCRIPT QUẢN LÝ Ổ ĐĨA — auto_disk_complete.txt
+
+# Phiên bản 2 — Cập nhật: 08/10/2025
+
+# Tương thích CentOS 7, chuẩn Unix (LF), màu ANSI, splash 5s
+
+# =========================================
+
+# --- Splash hướng dẫn màu (hiển thị 5 giây) ---
+
+echo -e "\e[33m=========================================\e[0m"
+echo -e "\e[5;1;36mHƯỚNG DẪN SỬ DỤNG NHANH — auto_disk_complete.txt\e[0m"
+echo -e "\e[33m=========================================\e[0m"
+echo
+echo -e "\e[32mScript quản lý ổ đĩa cho CentOS 7:\e[0m"
+echo " - Tạo / xóa / xem phân vùng"
+echo " - Quản lý LVM (PV/VG/LV)"
+echo " - Mount & bật quota"
+echo " - Cấu hình quota + Samba chia sẻ"
+echo
+echo -e "\e[34mCÁCH DÙNG:\e[0m"
+echo "   Cấp quyền & chạy:"
+echo "      chmod +x auto_disk_complete.txt"
+echo "      ./auto_disk_complete.txt"
+echo
+echo -e "\e[34mLƯU Ý NHANH:\e[0m"
+echo " - Chạy bằng tài khoản root."
+echo " - Sao lưu dữ liệu trước khi thao tác."
+echo " - Dành cho môi trường LAB hoặc học tập."
+echo -e "\e[33m=========================================\e[0m"
+sleep 5
+clear
+
+# =========================================
+
+# Script Quản lý Ổ ĐĨA cho CentOS 7 (chính)
+
+# =========================================
+
+# Hàm liệt kê ổ đĩa (toàn bộ disk + partition)
+
+list_disks() {
+echo -e "\e[36m=== THÔNG TIN Ổ ĐĨA TOÀN BỘ ===\e[0m"
+lsblk
+fdisk -l | grep '^Disk /dev' || true
+read -p "Nhấn Enter để tiếp tục..."
+}
+
+# Hàm quản lý phân vùng (menu phụ có màu)
+
+create_partition() {
+    while true; do
+        echo -e "\e[35m=== QUẢN LÝ PHÂN VÙNG ===\e[0m"
+        echo -e "\e[36m1. Tạo phân vùng tự động (khuyến nghị)\e[0m"
+        echo -e "\e[36m2. Mở fdisk thủ công\e[0m"
+        echo -e "\e[36m3. Xem danh sách phân vùng (chỉ partition)\e[0m"
+        echo -e "\e[36m4. Xóa toàn bộ phân vùng (dọn sạch ổ)\e[0m"
+        echo -e "\e[36m5. Quay lại menu chính\e[0m"
+        echo -e "\e[33m=======================================\e[0m"
+        read -p "Chọn [1-5]: " sub_choice
+
+        case $sub_choice in
+            1)
+                echo -e "\e[36m>>> Danh sách ổ đĩa hiện có:\e[0m"
+                lsblk -d -o NAME,SIZE,MODEL | grep -E "disk|loop" || lsblk -d -o NAME,SIZE,MODEL
+                echo
+                read -p "Nhập tên ổ đĩa (ví dụ /dev/sdb): " disk
+
+                if [[ ! -b "$disk" ]]; then
+                    echo "Ổ đĩa không tồn tại!"
+                    read -p "Nhấn Enter để tiếp tục..."
+                    continue
+                fi
+
+                read -p "CẢNH BÁO: Toàn bộ dữ liệu trên $disk sẽ bị xóa. Tiếp tục? (y/n): " confirm
+                [[ "$confirm" != "y" ]] && echo "Đã hủy thao tác." && read -p "Nhấn Enter để tiếp tục..." && continue
+
+                echo "Xóa bảng phân vùng cũ và tạo mới (GPT)..."
+                parted -s "$disk" mklabel gpt || { echo "Lỗi khi tạo label GPT."; read -p "Nhấn Enter..."; continue; }
+
+                echo "Nhập danh sách dung lượng phân vùng (ví dụ: 100M 200M 1G 2G)."
+                echo -e "\e[33mLƯU Ý: Chỉ chấp nhận đơn vị M (megabyte) và G (gigabyte). Phân vùng sẽ được tạo liên tiếp, không chồng chéo.\e[0m"
+                read -a sizes
+                [[ "${sizes[0]}" == "q" ]] && continue
+
+                for size in "${sizes[@]}"; do
+                    if ! [[ "$size" =~ ^[0-9]+(M|G)$ ]]; then
+                        echo "Đơn vị không hợp lệ cho $size! Chỉ hỗ trợ M hoặc G."
+                        read -p "Nhấn Enter để thử lại..."
+                        continue 2
+                    fi
+                done
+
+                # Lấy tổng dung lượng đĩa (MB, làm sạch ký tự lạ)
+                total_size=$(parted -s "$disk" unit MB print | grep '^Disk' | awk '{print $3}' | tr -dc '0-9')
+                start_mb=1  # bắt đầu từ 1MB để căn alignment 1MiB
+
+                for size in "${sizes[@]}"; do
+                    # Chuyển kích thước sang MB
+                    if [[ "$size" =~ M$ ]]; then
+                        add_mb=${size%M}
+                    elif [[ "$size" =~ G$ ]]; then
+                        add_mb=$(( ${size%G} * 1024 ))
+                    fi
+
+                    end_mb=$(( start_mb + add_mb ))
+
+                    # So sánh bằng cú pháp số học an toàn
+                    if (( end_mb > total_size )); then
+                        echo "Tổng dung lượng vượt quá dung lượng đĩa!"
+                        read -p "Nhấn Enter để tiếp tục..."
+                        break
+                    fi
+
+                    echo "Tạo phân vùng từ ${start_mb}MiB đến ${end_mb}MiB..."
+                    parted -s "$disk" mkpart primary "${start_mb}MiB" "${end_mb}MiB" || { echo "Lỗi khi tạo phân vùng: $size."; break; }
+
+                    partprobe "$disk" || true
+                    start_mb=$end_mb
+
+                    if (( start_mb >= total_size )); then
+                        echo "Đã hết dung lượng đĩa sau phân vùng này."
+                        break
+                    fi
+                done
+
+                echo "Cập nhật bảng phân vùng cuối cùng..."
+                partprobe "$disk" || { echo "Lỗi khi cập nhật partition table."; }
+                sleep 1  # chờ kernel nhận /dev/sdbX
+
+                echo "Kết quả sau khi tạo:"
+                lsblk "$disk" || true
+                echo "Hoàn tất tạo phân vùng. Kích thước có thể chênh lệch nhỏ do alignment."
+
+                echo -e "\e[33mLƯU Ý: Phân vùng đã tạo nhưng chưa có filesystem. Chọn menu 3 để format.\e[0m"
+                echo -e "\e[33mSau khi format, dùng menu 5 để mount và xem trong File Manager.\e[0m"
+                read -p "Nhấn Enter để tiếp tục..."
+                ;;
+
+            2)
+                echo -e "\e[36m>>> Danh sách ổ đĩa:\e[0m"
+                lsblk -d -o NAME,SIZE,TYPE | grep -E "disk|loop" || lsblk -d -o NAME,SIZE,TYPE
+                read -p "Nhập tên ổ đĩa (ví dụ /dev/sdb): " disk
+                if [[ -b "$disk" ]]; then
+                    fdisk "$disk"
+                    partprobe "$disk"
+                else
+                    echo "Ổ đĩa không hợp lệ!"
+                fi
+                read -p "Nhấn Enter để tiếp tục..."
+                ;;
+
+            3)
+                echo -e "\e[36m>>> Danh sách phân vùng hiện có (chỉ partition):\e[0m"
+                lsblk -o NAME,SIZE,TYPE,MOUNTPOINT | awk '$3 == "part" {print $0}' || lsblk -o NAME,SIZE,TYPE,MOUNTPOINT
+                read -p "Nhấn Enter để tiếp tục..."
+                ;;
+
+            4)
+                echo -e "\e[31m>>> Dọn sạch ổ đĩa (TOÀN BỘ) \e[0m"
+                lsblk -d -o NAME,SIZE,MODEL | grep -E "disk|loop" || lsblk -d -o NAME,SIZE,MODEL
+                read -p "Nhập tên ổ đĩa cần xóa toàn bộ (ví dụ /dev/sdb): " disk
+                if [[ ! -b "$disk" ]]; then
+                    echo "Ổ đĩa không tồn tại!"
+                    read -p "Nhấn Enter để tiếp tục..."
+                    continue
+                fi
+
+                read -p "CẢNH BÁO: Tất cả dữ liệu và phân vùng trên $disk sẽ bị xóa! Tiếp tục? (y/n): " confirm
+                [[ "$confirm" != "y" ]] && echo "Đã hủy thao tác." && read -p "Nhấn Enter để tiếp tục..." && continue
+
+                echo "Đang xóa bảng phân vùng và dữ liệu đầu ổ..."
+                wipefs -a "$disk" 2>/dev/null || echo "wipefs không hoạt động, tiếp tục..."
+                dd if=/dev/zero of="$disk" bs=1M count=10 status=none 2>/dev/null || echo "Lỗi khi zero đầu ổ."
+                partprobe "$disk" || true
+                echo "Đã dọn sạch toàn bộ phân vùng trên $disk."
+                read -p "Nhấn Enter để tiếp tục..."
+                ;;
+
+            5)
+                return
+                ;;
+            *)
+                echo "Lựa chọn không hợp lệ!"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+
+# Hàm tạo filesystem
+
+create_fs() {
+echo -e "\e[36m>>> Danh sách phân vùng:\e[0m"
+lsblk -o NAME,SIZE,TYPE,MOUNTPOINT | awk '$3 == "part" {print $0}' || lsblk -o NAME,SIZE,TYPE,MOUNTPOINT
+read -p "Nhập phân vùng (ví dụ /dev/sdb1): " part
+if [[ -b "$part" ]]; then
+fs_existing=$(blkid -o value -s TYPE "$part" 2>/dev/null || true)
+if [[ -n "$fs_existing" ]]; then
+echo "Phân vùng $part đã có filesystem ($fs_existing)."
+read -p "Bạn có chắc muốn format lại? (y/n): " confirm
+[[ "$confirm" != "y" ]] && echo "Hủy format." && return
+fi
+
+
+    echo "Chọn loại filesystem:"
+    select fs in xfs ext4 ext3; do
+        case $fs in
+            xfs) mkfs.xfs -f "$part"; partprobe "$part"; break;;
+            ext4) mkfs.ext4 -F "$part"; partprobe "$part"; break;;
+            ext3) mkfs.ext3 -F "$part"; partprobe "$part"; break;;
+            *) echo "Lựa chọn không hợp lệ";;
+        esac
+    done
+else
+    echo "Phân vùng $part không tồn tại hoặc không hợp lệ!"
+fi
+read -p "Nhấn Enter để tiếp tục..."
+
+
+}
+
+# Hàm quản lý LVM (có menu phụ màu)
+
+manage_lvm() {
+while true; do
+echo -e "\e[35m=== QUẢN LÝ LVM ===\e[0m"
+echo -e "\e[36m1. Tạo Physical Volume (PV)\e[0m"
+echo -e "\e[36m2. Tạo Volume Group (VG)\e[0m"
+echo -e "\e[36m3. Tạo Logical Volume (LV)\e[0m"
+echo -e "\e[36m4. Hiển thị thông tin PV/VG/LV\e[0m"
+echo -e "\e[36m5. Xóa PV/VG/LV\e[0m"
+echo -e "\e[36m6. Mở rộng dung lượng LVM\e[0m"
+echo -e "\e[36m7. Thêm PV vào VG và mở rộng LV\e[0m"
+echo -e "\e[36m8. Quay lại menu chính\e[0m"
+echo -e "\e[33m=================================\e[0m"
+read -p "Chọn [1-8]: " lvm_choice
+
+
+case $lvm_choice in
+    1)
+        echo -e "\e[36m>>> Chọn phân vùng để tạo PV:\e[0m"
+        lsblk -o NAME,SIZE,TYPE,MOUNTPOINT | awk '$3 == "part" {print $0}' || lsblk -o NAME,SIZE,TYPE,MOUNTPOINT
+        read -p "Nhập phân vùng (vd /dev/sdb1): " part
+        if [[ -b "$part" ]]; then
+            if pvs | grep -q "$part"; then
+                echo "Đã là PV."
+            else
+                pvcreate "$part" && echo "Tạo PV thành công" || echo "pvcreate thất bại"
+                pvscan || true
+            fi
+        else
+            echo "Phân vùng không tồn tại!"
+        fi
+        ;;
+
+    2)
+        pvs -o PV_NAME,SIZE || true
+        read -p "Nhập danh sách phân vùng (vd /dev/sdb1 /dev/sdc1): " parts
+        read -p "Nhập tên VG (vd VolumeA): " vg
+        if vgdisplay "$vg" &>/dev/null; then
+            echo "VG đã tồn tại!"
+        else
+            vgcreate "$vg" $parts && echo "Tạo VG thành công" || echo "vgcreate thất bại"
+            vgscan || true
+        fi
+        ;;
+
+    3)
+        vgs -o VG_NAME,VG_SIZE || true
+        read -p "Nhập tên VG: " vg
+        read -p "Nhập tên LV: " lv
+        read -p "Nhập dung lượng (vd 10G): " size
+        read -p "Chọn filesystem (ext4/xfs) [mặc định: xfs]: " fs
+        fs=${fs:-xfs}
+
+        if vgdisplay "$vg" &>/dev/null; then
+            lvcreate -L "$size" -n "$lv" "$vg" && mkfs.$fs "/dev/$vg/$lv" && echo "Đã tạo LV $lv ($fs)" || echo "lvcreate hoặc mkfs thất bại"
+            lvscan || true
+        else
+            echo "VG không tồn tại!"
+        fi
+        ;;
+
+    4)
+        echo "=== PHYSICAL VOLUMES ==="
+        pvs -o pv_name,pv_size,pv_free || true
+        echo "=== VOLUME GROUPS ==="
+        vgs -o vg_name,vg_size,vg_free || true
+        echo "=== LOGICAL VOLUMES ==="
+        lvs -o lv_name,vg_name,lv_size,lv_path || true
+        ;;
+
+    5)
+        echo "1. Xóa PV"
+        echo "2. Xóa VG"
+        echo "3. Xóa LV"
+        read -p "Chọn [1-3]: " del_choice
+        case $del_choice in
+            1)
+                pvs || true
+                read -p "Nhập tên PV (vd /dev/sdb1): " pv
+                read -p "Xác nhận xóa $pv (y/n): " ok
+                [[ $ok == y ]] && pvremove -ff "$pv"
+                ;;
+            2)
+                vgs || true
+                read -p "Nhập tên VG: " vg
+                read -p "Xác nhận xóa $vg (y/n): " ok
+                [[ $ok == y ]] && vgremove -ff "$vg"
+                ;;
+            3)
+                lvs || true
+                read -p "Nhập LV (vd /dev/VolumeA/LV1): " lv
+                if [[ "$lv" != /dev/* ]]; then lv="/dev/$lv"; fi
+                read -p "Xác nhận xóa $lv (y/n): " ok
+                [[ $ok == y ]] && lvremove -ff "$lv"
+                ;;
+            *) echo "Lựa chọn không hợp lệ!";;
+        esac
+        ;;
+
+    6)
+        echo "Mở rộng Logical Volume"
+        lvs -o LV_PATH,LV_SIZE || true
+        read -p "Nhập LV (vd /dev/VolumeA/LV1): " lv
+        read -p "Nhập dung lượng mở rộng (vd 5G): " size
+        lvextend -L +$size "$lv" || echo "lvextend thất bại"
+        fs=$(blkid -o value -s TYPE "$lv" 2>/dev/null || true)
+        if [[ "$fs" == "xfs" ]]; then
+            xfs_growfs "$lv" || true
+        else
+            resize2fs "$lv" || true
+        fi
+        echo "Đã mở rộng LV $lv"
+        ;;
+
+    7)
+        echo "Thêm PV vào VG và mở rộng LV"
+        vgs -o VG_NAME,VG_SIZE,VG_FREE || true
+        read -p "Nhập tên VG cần mở rộng: " vg
+        if ! vgdisplay "$vg" &>/dev/null; then
+            echo "VG không tồn tại!"
+            continue
+        fi
+
+        echo "Các phân vùng chưa thuộc PV nào:"
+        lsblk -o NAME,SIZE,TYPE,MOUNTPOINT | awk '$3 == "part" {print $0}' || lsblk -o NAME,SIZE,TYPE,MOUNTPOINT
+        echo
+        pvs | awk '{print $1}' | grep -v 'PV' > /tmp/current_pv.txt || true
+        echo "Các PV hiện tại trong VG $vg:"
+        vgs "$vg" -o PV_NAME --noheadings || true
+        read -p "Nhập phân vùng mới cần thêm (vd /dev/sde5): " newpv
+
+        if [[ ! -b "$newpv" ]]; then
+            echo "Phân vùng không tồn tại!"
+            continue
+        fi
+
+        if ! pvs | grep -q "$newpv"; then
+            pvcreate "$newpv" && echo "Đã tạo PV trên $newpv" || echo "pvcreate thất bại"
+        fi
+
+        vgextend "$vg" "$newpv" && echo "Đã thêm $newpv vào VG $vg" || echo "vgextend thất bại"
+
+        echo
+        echo "Các LV trong VG $vg:"
+        lvs "$vg" -o LV_NAME,LV_PATH,LV_SIZE || true
+        read -p "Nhập tên LV cần mở rộng (vd LV hoặc /dev/$vg/LV): " lv
+        if [[ "$lv" != /dev/* ]]; then
+            lv="/dev/$vg/$lv"
+        fi
+        read -p "Nhập dung lượng cần tăng (vd 2G): " size
+
+        lvextend -L +$size "$lv" "$newpv" || echo "lvextend thất bại"
+        fs=$(blkid -o value -s TYPE "$lv" 2>/dev/null || true)
+        if [[ "$fs" == "xfs" ]]; then
+            xfs_growfs "$lv" || true
+        else
+            resize2fs "$lv" || true
+        fi
+
+        echo "Đã mở rộng LV $lv thêm $size bằng PV $newpv"
+        vgscan && lvscan || true
+        ;;
+    8) return ;;
+    *) echo "Lựa chọn không hợp lệ!";;
+esac
+read -p "Nhấn Enter để tiếp tục..."
+
+
+done
+}
+
+configure_mount_quota() {
+echo -e "\e[36m>>> Cấu hình mount và quota\e[0m"
+echo ">>> Danh sách Logical Volumes:"
+lvs -o LV_NAME,VG_NAME,LV_SIZE || true
+read -p "Nhập Logical Volume (ví dụ /dev/VolumeA/LV1): " lv
+read -p "Nhập đường dẫn thư mục mount (ví dụ /home/Disk): " mount_dir
+
+
+if [[ ! -b "$lv" ]]; then
+    echo "Logical Volume $lv không tồn tại hoặc không hợp lệ!"
+    read -p "Nhấn Enter để tiếp tục..."
+    return
+fi
+
+vg=$(echo $lv | cut -d'/' -f3)
+lvname=$(echo $lv | cut -d'/' -f4)
+real_lv="/dev/mapper/${vg}-${lvname}"
+
+[[ ! -d "$mount_dir" ]] && mkdir -p "$mount_dir" && echo "Đã tạo thư mục $mount_dir"
+
+fs_type=$(blkid -o value -s TYPE "$real_lv" 2>/dev/null || true)
+if [[ -z "$fs_type" ]]; then
+    echo "Không phát hiện filesystem, bạn có muốn format $real_lv không?"
+    read -p "(y/n): " confirm
+    if [[ "$confirm" == "y" ]]; then
+        read -p "Chọn loại filesystem (ext4/xfs) [ext4]: " choice
+        fs_type=${choice:-ext4}
+        mkfs.$fs_type -f "$real_lv" || true
+        echo "Đã format $real_lv với $fs_type"
+    else
+        echo "Không thể tiếp tục nếu chưa có filesystem!"
+        return
+    fi
+fi
+echo "Filesystem của $real_lv là: $fs_type"
+
+mountpoint -q "$mount_dir" || mount "$real_lv" "$mount_dir" || true
+echo "Đã mount $real_lv vào $mount_dir"
+chmod 777 "$mount_dir" || true
+
+if [[ "$fs_type" == "xfs" ]]; then
+    quota_opts="uquota,gquota"
+else
+    quota_opts="usrquota,grpquota"
+fi
+
+if ! grep -q "$real_lv" /etc/fstab; then
+    echo "$real_lv $mount_dir $fs_type defaults,$quota_opts 0 0" >> /etc/fstab
+    echo "Đã thêm cấu hình vào /etc/fstab"
+fi
+
+mount -o remount "$mount_dir" || true
+echo "Đã remount $mount_dir với quota"
+
+if [[ "$fs_type" == "xfs" ]]; then
+    echo "XFS không cần quotacheck. Quota sẽ hoạt động sau remount."
+else
+    quotacheck -avug || true
+    quotaon -avug || true
+    echo "Đã bật quota cho $mount_dir"
+fi
+
+read -p "Nhấn Enter để tiếp tục..."
+
+
+}
+
+configure_samba_anonymous() {
+    echo ">>> Cấu hình Samba chia sẻ thư mục với quyền anonymous"
+
+    echo "📂 Danh sách thư mục mount hiện tại:"
+    mapfile -t mount_points < <(df -hT | awk 'NR>1 && $2!="tmpfs" && $2!="devtmpfs" {print $7}')
+    select share_dir in "${mount_points[@]}" "Nhập thủ công"; do
+        if [[ "$share_dir" == "Nhập thủ công" ]]; then
+            read -p "Nhập đường dẫn thư mục chia sẻ (vd: /home/Disk): " share_dir
+            break
+        elif [[ -n "$share_dir" ]]; then
+            break
+        else
+            echo "❌ Lựa chọn không hợp lệ!"
+        fi
+    done
+
+    [[ ! -d "$share_dir" ]] && echo "⚠️ Thư mục không tồn tại!" && return
+
+    # Cài Samba nếu chưa có
+    if ! rpm -q samba &>/dev/null; then
+        yum install -y samba samba-client
+    fi
+
+    # Thêm chia sẻ anonymous
+    if ! grep -q "^\[share\]" /etc/samba/smb.conf; then
+        cat <<EOL >> /etc/samba/smb.conf
+
+[share]
+   path = $share_dir
+   browsable = yes
+   public = yes
+   writable = yes
+   guest ok = yes
+   create mask = 0666
+   directory mask = 0777
+EOL
+        echo "✅ Đã thêm mục [share] vào smb.conf"
+    fi
+
+    # Bật anonymous mapping
+    sed -i '/^\[global\]/a map to guest = Bad User' /etc/samba/smb.conf
+    sed -i '/^\[global\]/a guest account = nobody' /etc/samba/smb.conf
+
+    systemctl enable smb nmb
+    systemctl restart smb nmb
+    echo "✅ Samba đã khởi động lại"
+
+    # Tắt firewall và SELinux cho lab
+    systemctl stop firewalld 2>/dev/null
+    systemctl disable firewalld 2>/dev/null
+    sed -i 's/^SELINUX=.*/SELINUX=disabled/g' /etc/selinux/config
+
+    echo "🌐 Chia sẻ anonymous đã sẵn sàng tại: //$HOSTNAME/share"
+    read -p "Nhấn Enter để tiếp tục..."
+}
+configure_quota_user() {
+    echo ">>> Cấu hình quota cho user"
+
+    echo "📂 Danh sách thư mục mount hiện tại:"
+    mapfile -t mount_points < <(df -hT | awk 'NR>1 && $2!="tmpfs" && $2!="devtmpfs" {print $7}')
+    select mount_dir in "${mount_points[@]}" "Nhập thủ công"; do
+        if [[ "$mount_dir" == "Nhập thủ công" ]]; then
+            read -p "Nhập đường dẫn mount (vd /home/Disk): " mount_dir
+            break
+        elif [[ -n "$mount_dir" ]]; then
+            break
+        else
+            echo "❌ Lựa chọn không hợp lệ!"
+        fi
+    done
+
+    [[ ! -d "$mount_dir" ]] && echo "⚠️ Thư mục không tồn tại!" && return
+
+    echo "1. Chọn user có sẵn"
+    echo "2. Tạo user mới"
+    read -p "Chọn [1-2]: " choice
+
+    case $choice in
+        1)
+            users=($(getent passwd | awk -F: '$3 >= 1000 && $1 != "nfsnobody" {print $1}'))
+            PS3="Chọn user: "
+            select user in "${users[@]}"; do
+                [[ -n "$user" ]] && break
+                echo "Lựa chọn không hợp lệ!"
+            done
+            ;;
+        2)
+            read -p "Nhập tên user mới: " user
+            useradd "$user"
+            passwd "$user"
+            ;;
+        *)
+            echo "❌ Lựa chọn không hợp lệ!" && return
+            ;;
+    esac
+
+    fs_type=$(df -T "$mount_dir" | awk 'NR==2{print $2}')
+
+    read -p "Giới hạn mềm (soft) MB: " soft_mb
+    read -p "Giới hạn cứng (hard) MB: " hard_mb
+
+    if [[ "$fs_type" == "xfs" ]]; then
+        xfs_quota -x -c "limit bsoft=${soft_mb}M bhard=${hard_mb}M $user" "$mount_dir"
+        xfs_quota -x -c "report -h" "$mount_dir"
+    else
+        soft_blocks=$((soft_mb * 1024))
+        hard_blocks=$((hard_mb * 1024))
+        setquota -u "$user" "$soft_blocks" "$hard_blocks" 0 0 "$mount_dir"
+    fi
+
+    echo "✅ Đã gán quota cho $user (soft=${soft_mb}MB, hard=${hard_mb}MB)"
+	smbpasswd -a "$user"
+    read -p "Nhấn Enter để tiếp tục..."
+}
+
+# MENU CHÍNH
+
+while true; do
+echo -e "\e[33m=== MENU CHÍNH — QUẢN LÝ Ổ ĐĨA ===\e[0m"
+echo -e "\e[34m1. Liệt kê ổ đĩa\e[0m"
+echo -e "\e[34m2. Tạo phân vùng\e[0m"
+echo -e "\e[34m3. Tạo filesystem\e[0m"
+echo -e "\e[34m4. Quản lý LVM (PV/VG/LV)\e[0m"
+echo -e "\e[34m5. Cấu hình mount và quota\e[0m"
+echo -e "\e[34m6. Cấu hình Samba chia sẻ\e[0m"
+echo -e "\e[34m7. Cấu hình quota cho user\e[0m"
+echo -e "\e[34m8. Thoát\e[0m"
+echo -e "\e[33m=========================================\e[0m"
+read -p "Chọn [1-7]: " choice
+
+
+case $choice in
+    1) list_disks ;;
+    2) create_partition ;;
+    3) create_fs ;;
+    4) manage_lvm ;;
+    5) configure_mount_quota ;;
+    6) configure_samba_anonymous  ;;
+	7) configure_quota_user ;;
+    8) echo "Thoát..."; exit 0 ;;
+    *) echo "Lựa chọn không hợp lệ!"; sleep 1 ;;
+esac
+
+
+done
